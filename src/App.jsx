@@ -285,8 +285,8 @@ export default function App() {
     <div className="flex flex-col h-screen bg-slate-50">
       <header className="flex items-center justify-between px-5 py-2.5 bg-white border-b border-slate-100/80 flex-shrink-0 z-10">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-sm shadow-indigo-200">
-            <span className="text-xs">🎓</span>
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-sm shadow-indigo-200 overflow-hidden">
+            <img src="/agent-avatar.svg" alt="LN" className="w-full h-full object-cover" />
           </div>
           <span className="text-sm font-bold text-slate-700 tracking-tight">
             Lecture<span className="text-indigo-500">Note</span>
