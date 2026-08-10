@@ -1,6 +1,5 @@
 import { useCallback } from 'react';
 import RichTextEditor from './RichTextEditor';
-import { downloadWord, downloadPDF, copyOutlineText } from '../utils/export';
 
 function SourceTag({ source }) {
   if (source === 'user') {
@@ -17,7 +16,7 @@ function SourceTag({ source }) {
   );
 }
 
-export default function OutlinePanel({ outline, setOutline, subtitles = [], isStopped = false, questions = null }) {
+export default function OutlinePanel({ outline, setOutline, subtitles = [], questions = null }) {
   const hasContent = outline && (outline.title || (outline.sections && outline.sections.length > 0));
 
   const updateTitle = useCallback(
@@ -242,8 +241,8 @@ export default function OutlinePanel({ outline, setOutline, subtitles = [], isSt
                     </div>
                   )}
                   <details className="mt-2">
-                    <summary className="text-xs text-amber-600 cursor-pointer hover:text-amber-700 font-medium">查看答案</summary>
-                    <p className="text-sm text-slate-700 mt-1.5 pl-2.5 py-1.5 border-l-2 border-amber-300 bg-white/50 rounded-r">
+                    <summary className="text-xs text-amber-700 cursor-pointer hover:text-amber-800 font-medium">查看答案</summary>
+                    <p className="text-sm text-amber-900 mt-1.5 px-3 py-2 bg-amber-50 rounded-xl border border-amber-100">
                       {q.answer}
                     </p>
                   </details>
@@ -253,40 +252,6 @@ export default function OutlinePanel({ outline, setOutline, subtitles = [], isSt
           </div>
         )}
       </div>
-
-      {/* 导出栏 */}
-      {isStopped && hasContent && (
-        <div className="border-t border-slate-100 px-5 py-4 bg-white/80 backdrop-blur-sm animate-fade-up">
-          <p className="text-xs font-semibold text-slate-500 mb-3 uppercase tracking-wider">📥 导出笔记</p>
-          <div className="flex gap-2.5">
-            <button
-              onClick={() => downloadWord(outline, subtitles, questions)}
-              className="flex-1 px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-indigo-600 text-white text-sm font-medium rounded-xl
-                         hover:from-indigo-600 hover:to-indigo-700 active:scale-[0.98] transition-all duration-200 shadow-md shadow-indigo-200"
-            >
-              📄 Word 文档
-            </button>
-            <button
-              onClick={() => downloadPDF(outline, subtitles, questions)}
-              className="flex-1 px-5 py-2.5 bg-white text-slate-700 text-sm font-medium rounded-xl border border-slate-200
-                         hover:bg-slate-50 hover:border-slate-300 active:scale-[0.98] transition-all duration-200"
-            >
-              🖨️ PDF 打印
-            </button>
-            <button
-              onClick={async () => {
-                await copyOutlineText(outline);
-                alert('大纲已复制到剪贴板');
-              }}
-              className="px-4 py-2.5 bg-white text-slate-600 text-sm rounded-xl border border-slate-200
-                         hover:bg-slate-50 hover:border-slate-300 active:scale-[0.98] transition-all duration-200"
-              title="复制纯文本大纲"
-            >
-              📋
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

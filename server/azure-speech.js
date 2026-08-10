@@ -1,9 +1,3 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
 let speechConfig = null;
 let recognizer = null;
 let pushStream = null;
@@ -16,7 +10,7 @@ async function getSdk() {
   return sdkModule;
 }
 
-export async function initializeSpeech() {
+async function initializeSpeech() {
   const subscriptionKey = process.env.AZURE_SPEECH_KEY;
   const region = process.env.AZURE_SPEECH_REGION || 'southeastasia';
 
@@ -43,33 +37,42 @@ export async function initializeSpeech() {
   return recognizer;
 }
 
-export async function startRecognition(ws, onTranscript) {
+export async function startRecognition(ws, onTranscript, onPartial) {
   if (!recognizer) {
     await initializeSpeech();
   }
 
   recognizer.recognizing = (s, e) => {
-    // 中间结果——实时推送到前端
+    // 中间结果——实时推送到前端 + 触发实时翻译
     if (e.result.text && e.result.text.trim()) {
+      const partialText = e.result.text.trim();
       ws.send(JSON.stringify({
         type: 'partial_transcript',
-        text: e.result.text.trim(),
+        text: partialText,
         timestamp: Date.now(),
       }));
+      if (onPartial) {
+        onPartial(partialText, Date.now());
+      }
     }
   };
 
   recognizer.recognized = (s, e) => {
-    // 最终识别结果 → 立即推送英文，翻译异步处理
+    // 最终识别结果 → 推送英文 + 触发翻译
     if (e.result.text && e.result.text.trim()) {
       const text = e.result.text.trim();
-      ws.send(JSON.stringify({
-        type: 'final_transcript',
-        text,
-        timestamp: Date.now(),
-      }));
+      const timestamp = Date.now();
+
+      // 跳过太短的填充词（yeah, OK, um…），不展示也不翻译
+      const wordCount = text.split(/\s+/).length;
+      const isTooShort = wordCount < 3 && text.length < 20;
+
+      if (!isTooShort) {
+        ws.send(JSON.stringify({ type: 'final_transcript', text, timestamp }));
+      }
+
       if (onTranscript) {
-        onTranscript(text, Date.now());
+        onTranscript(text, timestamp, isTooShort);
       }
     }
   };

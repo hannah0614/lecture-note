@@ -23,6 +23,14 @@ export default function App() {
   const [startError, setStartError] = useState(null);
   const [serverError, setServerError] = useState(null);
 
+  // ref 同步最新值，避免在 setState 函数式更新器里做副作用（saveSession）
+  const subtitlesRef = useRef(subtitles);
+  const outlineRef = useRef(outline);
+  const questionsRef = useRef(questions);
+  subtitlesRef.current = subtitles;
+  outlineRef.current = outline;
+  questionsRef.current = questions;
+
   // recordingPhase: 'idle' (进入页面但未开始) | 'active' | 'paused'
   const [recordingPhase, setRecordingPhase] = useState('idle');
   const [wakingUp, setWakingUp] = useState(false);
@@ -61,6 +69,11 @@ export default function App() {
       setWakingUp(false);
       setRecordingPhase('idle');
       setScreen('recording');
+      isStoppingRef.current = false;
+      if (stopTimeoutRef.current) {
+        clearTimeout(stopTimeoutRef.current);
+        stopTimeoutRef.current = null;
+      }
     } catch (err) {
       setWakingUp(false);
       console.error('进入课堂失败:', err.message);
@@ -95,37 +108,35 @@ export default function App() {
     send({ type: 'resume' });
   }, [send]);
 
-  // 结束
+  const stopTimeoutRef = useRef(null);
+  const isStoppingRef = useRef(false);
+
+  // 结束——等服务端完成收尾（大纲+练习题）后再断开
   const handleStop = useCallback(() => {
+    if (isStoppingRef.current) return;  // 防止重复点击/重复调用
     if (recordingPhase !== 'idle') {
+      isStoppingRef.current = true;
       stopMic();
       send({ type: 'stop_session' });
-    }
 
-    setTimeout(() => {
+      // fallback：如果 15 秒内没收到 session_stopped，强制断开
+      stopTimeoutRef.current = setTimeout(() => {
+        console.warn('未收到 session_stopped，强制断开');
+        if (!questionsRef.current) {
+          const s = subtitlesRef.current;
+          if (s.length > 0) {
+            saveSession({ subtitles: s, outline: outlineRef.current, questions: null });
+          }
+        }
+        isStoppingRef.current = false;
+        wsDisconnect();
+        setScreen('home');
+      }, 15000);
+    } else {
+      // 空闲态直接返回首页（没有 stop_session 可发）
       wsDisconnect();
-
-      if (recordingPhase !== 'idle') {
-        setSubtitles((currentSubtitles) => {
-          setOutline((currentOutline) => {
-            setQuestions((currentQuestions) => {
-              if (currentSubtitles.length > 0) {
-                saveSession({
-                  subtitles: currentSubtitles,
-                  outline: currentOutline,
-                  questions: currentQuestions,
-                });
-              }
-              return currentQuestions;
-            });
-            return currentOutline;
-          });
-          return currentSubtitles;
-        });
-      }
-
       setScreen('home');
-    }, 2000);
+    }
   }, [recordingPhase, stopMic, send, wsDisconnect]);
 
   const handleViewHistory = useCallback(() => {
@@ -150,17 +161,21 @@ export default function App() {
     on('partial_transcript', (msg) => {
       setSubtitles((prev) => {
         const filtered = prev.filter((s) => s.id !== '__partial__');
-        return [...filtered, { id: '__partial__', original: msg.text, translated: '', isNew: true, isPartial: true }];
+        // 保留上一次的翻译结果，不要每次清空
+        const prevPartial = prev.find((s) => s.id === '__partial__');
+        return [...filtered, { id: '__partial__', original: msg.text, translated: prevPartial?.translated || '', isNew: true, isPartial: true }];
       });
     });
 
     on('final_transcript', (msg) => {
       setSubtitles((prev) => {
         const filtered = prev.filter((s) => s.id !== '__partial__');
+        // 保留 partial 阶段的翻译结果，避免空白闪烁
+        const prevPartial = prev.find((s) => s.id === '__partial__');
         const newSub = {
           id: ++subtitleId,
           original: msg.text,
-          translated: '...',
+          translated: prevPartial?.translated || '...',
           isNew: true,
           isPartial: false,
         };
@@ -169,19 +184,66 @@ export default function App() {
     });
 
     on('translation', (msg) => {
+      setSubtitles((prev) => {
+        // 部分翻译：更新 __partial__ 条目，原文在不断增长但翻译始终在同一行
+        if (!msg.isFinal) {
+          return prev.map((s) =>
+            s.id === '__partial__' ? { ...s, translated: msg.text } : s
+          );
+        }
+        // 最终翻译：按原文精确匹配
+        return prev.map((s) =>
+          s.original === msg.original ? { ...s, translated: msg.text } : s
+        );
+      });
+    });
+
+    on('translation_error', (msg) => {
+      // 翻译失败时标红显示，不回退到 "..." 状态
       setSubtitles((prev) =>
-        prev.map((s) => (s.original === msg.original ? { ...s, translated: msg.text } : s))
+        prev.map((s) => (s.original === msg.original ? { ...s, translated: '⚠️ 翻译失败' } : s))
       );
     });
 
     on('outline_update', (msg) => {
-      setOutline((prev) => mergeOutline(prev, msg.outline));
+      setOutline((prev) => {
+        const merged = mergeOutline(prev, msg.outline);
+        outlineRef.current = merged;  // 同步 ref
+        return merged;
+      });
     });
 
     on('practice_questions', (msg) => {
       if (msg.questions && msg.questions.length > 0) {
+        questionsRef.current = msg.questions;
         setQuestions(msg.questions);
+
+        // 练习题到位立即保存，不等到 session_stopped
+        const s = subtitlesRef.current;
+        const o = outlineRef.current;
+        if (s.length > 0) {
+          saveSession({ subtitles: s, outline: o, questions: msg.questions });
+        }
       }
+    });
+
+    on('session_stopped', () => {
+      if (stopTimeoutRef.current) {
+        clearTimeout(stopTimeoutRef.current);
+        stopTimeoutRef.current = null;
+      }
+
+      // 兜底：练习题没到，保存无练习题版本
+      if (!questionsRef.current) {
+        const s = subtitlesRef.current;
+        if (s.length > 0) {
+          saveSession({ subtitles: s, outline: outlineRef.current, questions: null });
+        }
+      }
+
+      isStoppingRef.current = false;
+      wsDisconnect();
+      setScreen('home');
     });
 
     on('error', (msg) => {
@@ -238,8 +300,8 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        <div className="w-2/5 border-r border-slate-100 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden max-md:flex-col">
+        <div className="w-2/5 max-md:w-full max-md:h-[45vh] border-r border-slate-100 max-md:border-r-0 max-md:border-b overflow-hidden">
           <SubtitlePanel
             subtitles={subtitles}
             recordingPhase={recordingPhase}
@@ -250,12 +312,11 @@ export default function App() {
             serverError={serverError}
           />
         </div>
-        <div className="w-3/5 overflow-hidden">
+        <div className="w-3/5 max-md:w-full max-md:h-[55vh] overflow-hidden">
           <OutlinePanel
             outline={outline}
             setOutline={setOutline}
             subtitles={subtitles}
-            isStopped={false}
             questions={questions}
           />
         </div>

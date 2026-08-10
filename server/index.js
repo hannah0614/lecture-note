@@ -7,6 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import { startRecognition, pushAudioData, stopRecognition } from './azure-speech.js';
 import { translate, generateOutline, generateQuestions } from './deepseek.js';
+import { extractPdfText, warmupOcr } from './pdf-utils.js';
 
 config();
 
@@ -161,6 +162,76 @@ const httpServer = createServer((req, res) => {
     return;
   }
 
+  // PDF 上传端点
+  if (req.method === 'POST' && req.url === '/upload-pdf') {
+    const contentType = req.headers['content-type'] || '';
+    if (!contentType.includes('multipart/form-data')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '需要 multipart/form-data' }));
+      return;
+    }
+
+    const boundary = '--' + contentType.split('boundary=')[1];
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', async () => {
+      try {
+        const buffer = Buffer.concat(chunks);
+        const str = buffer.toString('binary');
+        const parts = str.split(boundary);
+
+        for (const part of parts) {
+          if (!part.includes('Content-Disposition') || !part.includes('filename=')) continue;
+
+          const filenameMatch = part.match(/filename="([^"]*)"/);
+          const filename = filenameMatch ? filenameMatch[1] : 'upload.pdf';
+
+          const bodyStart = part.indexOf('\r\n\r\n');
+          if (bodyStart === -1) continue;
+          let body = part.slice(bodyStart + 4);
+          if (body.endsWith('\r\n')) body = body.slice(0, -2);
+
+          const fileBuffer = Buffer.from(body, 'binary');
+
+          if (!filename.toLowerCase().endsWith('.pdf')) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: '只支持 .pdf 文件' }));
+            return;
+          }
+
+          const tmpPath = path.join(os.tmpdir(), `upload_${Date.now()}.pdf`);
+          fs.writeFileSync(tmpPath, fileBuffer);
+
+          let text;
+          try {
+            text = await extractPdfText(tmpPath);
+          } catch (err) {
+            console.error('PDF 提取失败:', err);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `PDF 解析失败: ${err.message}` }));
+            try { fs.unlinkSync(tmpPath); } catch {}
+            return;
+          }
+
+          try { fs.unlinkSync(tmpPath); } catch {}
+
+          console.log(`PDF 上传成功: ${filename}, 提取 ${text.length} 字符`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, filename, text }));
+          return;
+        }
+
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: '未找到文件' }));
+      } catch (err) {
+        console.error('PDF 上传处理失败:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404);
   res.end('Not Found');
 });
@@ -169,6 +240,8 @@ const wss = new WebSocketServer({ server: httpServer });
 
 httpServer.listen(PORT, () => {
   console.log(`服务器运行在端口 ${PORT} (Azure: ${process.env.AZURE_SPEECH_REGION})`);
+  // 预热 OCR 引擎（后台下载语言包，不阻塞服务）
+  warmupOcr().catch((e) => console.error('OCR 预热失败:', e.message));
 });
 
 wss.on('connection', (ws) => {
@@ -178,6 +251,28 @@ wss.on('connection', (ws) => {
   let outlineInterval = null;
   let isPaused = false;
   let pptContext = '';
+  let translateQueue = [];
+  let runningTranslations = 0;
+  const MAX_CONCURRENT = 5;
+  let totalRecognized = 0;
+  let totalFiltered = 0;
+  let totalTranslated = 0;
+  let lastPartialText = '';
+  let lastPartialTime = 0;
+  let isStopping = false;
+
+  function processTranslateQueue() {
+    while (runningTranslations < MAX_CONCURRENT && translateQueue.length > 0) {
+      const task = translateQueue.shift();
+      runningTranslations++;
+      task()
+        .catch(() => {})
+        .finally(() => {
+          runningTranslations--;
+          processTranslateQueue();
+        });
+    }
+  }
 
   function startOutline() {
     outlineInterval = setInterval(async () => {
@@ -214,26 +309,78 @@ wss.on('connection', (ws) => {
         transcriptBuffer = [];
 
         try {
-          await startRecognition(ws, async (text, timestamp) => {
-            // 过滤非英语语音（中文汉字 / 拼音 / 其他语言）
-            if (isNotEnglish(text)) {
-              console.log(`过滤非英语: ${text.slice(0, 50)}...`);
-              return;
-            }
+          await startRecognition(
+            ws,
+            // onTranscript (final) — 完整句子
+            async (text, timestamp, isTooShort) => {
+              totalRecognized++;
+              if (isNotEnglish(text)) {
+                totalFiltered++;
+                console.log(`[识别 #${totalRecognized}] 过滤: "${text.slice(0, 60)}"`);
+                return;
+              }
 
-            transcriptBuffer.push({ text, timestamp });
+              // 太短的填充词只存缓冲给大纲用，不翻译不展示
+              if (isTooShort) {
+                console.log(`[识别 #${totalRecognized}] 跳过: "${text}" (填充词)`);
+                transcriptBuffer.push({ text, timestamp });
+                return;
+              }
 
-            // 异步翻译
-            try {
-              const zh = await translate(text);
-              ws.send(JSON.stringify({ type: 'translation', text: zh, original: text, timestamp }));
-            } catch (e) {
-              console.error('翻译失败:', e.message);
+              console.log(`[识别 #${totalRecognized}] 通过: "${text.slice(0, 60)}" → 排队翻译`);
+              transcriptBuffer.push({ text, timestamp });
+              lastPartialText = ''; // 重置，准备下一句
+
+              // 加入翻译队列
+              translateQueue.push(async () => {
+                try {
+                  const zh = await translate(text);
+                  totalTranslated++;
+                  if (ws.readyState === 1) {
+                    ws.send(JSON.stringify({ type: 'translation', text: zh, original: text, timestamp, isFinal: true }));
+                  }
+                } catch (e) {
+                  console.error(`[翻译失败] 原文: "${text.slice(0, 50)}" 错误: ${e.message}`);
+                  if (ws.readyState === 1) {
+                    ws.send(JSON.stringify({ type: 'translation_error', original: text, error: e.message }));
+                  }
+                }
+              });
+              processTranslateQueue();
+            },
+            // onPartial — 实时片段翻译，低延迟同传体验
+            (partialText, timestamp) => {
+              if (isNotEnglish(partialText)) return;
+
+              // 去重：和上次比至少多 10 个字符才重新翻译
+              if (partialText === lastPartialText) return;
+              if (partialText.length - lastPartialText.length < 10) return;
+
+              // 节流：每个句子最多每秒翻译一次
+              const now = Date.now();
+              if (now - lastPartialTime < 1000) return;
+
+              lastPartialText = partialText;
+              lastPartialTime = now;
+
+              // 加入翻译队列（用较低的优先级，让完整句子的翻译优先）
+              translateQueue.push(async () => {
+                try {
+                  const zh = await translate(partialText);
+                  if (ws.readyState === 1) {
+                    ws.send(JSON.stringify({ type: 'translation', text: zh, original: partialText, timestamp, isFinal: false }));
+                  }
+                } catch (e) {
+                  // partial 翻译失败不通知前端，等 final 翻译即可
+                  console.error(`[部分翻译失败] "${partialText.slice(0, 40)}" ${e.message}`);
+                }
+              });
+              processTranslateQueue();
             }
-          });
+          );
 
           startOutline();
-          ws.send(JSON.stringify({ type: 'session_started' }));
+          // session_started 仅用于前端确认会话已就绪（当前前端不监听此事件）
         } catch (err) {
           console.error('启动 ASR 失败:', err);
           ws.send(JSON.stringify({ type: 'error', message: `ASR 启动失败: ${err.message}` }));
@@ -241,29 +388,40 @@ wss.on('connection', (ws) => {
         break;
 
       case 'stop_session':
+        if (isStopping) { console.log('已在处理结束流程，忽略'); return; }
+        isStopping = true;
         console.log('会话结束');
+        console.log(`[统计] 识别${totalRecognized}句, 过滤${totalFiltered}句, 翻译成功${totalTranslated}句`);
         await stopRecognition();
         if (outlineInterval) { clearInterval(outlineInterval); outlineInterval = null; }
 
         // 生成最终大纲
+        let finalOutline = null;
         if (transcriptBuffer.length > 0) {
           try {
-            const outline = await generateOutline(transcriptBuffer, pptContext);
-            ws.send(JSON.stringify({ type: 'outline_update', outline }));
-          } catch (e) { /* ignore */ }
+            finalOutline = await generateOutline(transcriptBuffer, pptContext);
+            console.log(`最终大纲已生成: ${finalOutline?.title || '(无标题)'}, ${finalOutline?.sections?.length || 0} 章节`);
+            ws.send(JSON.stringify({ type: 'outline_update', outline: finalOutline }));
+          } catch (e) {
+            console.error('最终大纲生成失败:', e.message, e.stack?.slice(0, 200));
+          }
         }
 
-        // 生成练习题
-        if (transcriptBuffer.length > 3) {
+        // 生成练习题（复用上面的大纲，不再重复生成）
+        if (transcriptBuffer.length > 3 && finalOutline) {
           try {
-            console.log('生成练习题...');
-            // 先拿到当前大纲数据给练习题生成用
-            const finalOutline = await generateOutline(transcriptBuffer, pptContext);
+            console.log(`生成练习题… (基于${transcriptBuffer.length}条记录)`);
             const questions = await generateQuestions(transcriptBuffer, finalOutline);
+            console.log(`练习题已生成: ${questions?.questions?.length || 0} 道`);
             ws.send(JSON.stringify({ type: 'practice_questions', ...questions }));
           } catch (e) {
             console.error('练习题生成失败:', e.message);
+            console.error('完整错误:', e.stack?.slice(0, 300));
+            // 通知前端练习题生成失败
+            ws.send(JSON.stringify({ type: 'error', message: `练习题生成失败: ${e.message}` }));
           }
+        } else {
+          console.log(`跳过练习题: buffer=${transcriptBuffer.length}, outline=${!!finalOutline}`);
         }
 
         ws.send(JSON.stringify({ type: 'session_stopped' }));

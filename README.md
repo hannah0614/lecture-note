@@ -2,7 +2,8 @@
 
 > 课堂实时同声传译 + 中英双语结构化大纲笔记 — Eazo Global Youth AI Agent Hackathon (Singapore)
 
-**Public URL**: [https://lecture-note-tau.vercel.app](https://lecture-note-tau.vercel.app)
+**Frontend**: [https://lecture-note-tau.vercel.app](https://lecture-note-tau.vercel.app)  
+**Backend**: `wss://lecture-note-2we1.onrender.com`
 
 ---
 
@@ -29,14 +30,16 @@ Tabbed view: outline, subtitles, practice questions — with Word/PDF export.
 | Feature | Description |
 |---------|-------------|
 | 🎙️ **Real-time ASR** | Azure Speech Services, `en-IN` model optimized for Indian English |
-| 🌐 **Live Translation** | DeepSeek API: English → Chinese simultaneous translation |
-| 📝 **AI Outline** | Auto-generated bilingual structured outline every 30 seconds |
-| 📎 **PPT Upload** | Upload `.pptx` files to provide lecture context for better outlines |
-| ✏️ **Practice Questions** | AI generates quiz questions (MCQ / short answer / true-false) after class |
+| 🌐 **Simultaneous Translation** | DeepSeek API: real-time English → Chinese, partial-text streaming for low-latency同传 |
+| 🧹 **Filler Word Filtering** | Automatically filters hesitation words (yeah, OK, um…) from the subtitle feed |
+| 📝 **AI Outline** | Auto-generated bilingual structured outline every 30 seconds, merges with manual edits |
+| 📎 **Courseware Upload** | Upload `.pptx` / `.pdf` files to provide lecture context; image-based PDFs auto-OCR |
+| ✏️ **15 Exam Questions** | End-of-class: 15 core quiz questions prioritized by exam hints (MCQ / short answer / true-false) |
 | ⏯️ **Pause / Resume** | Adapt to lecture breaks and discussions |
-| 🎨 **Rich Text Editing** | 4-color highlighting, H1/H2/H3 headings, Bold/Italic/Underline |
+| 🎨 **Rich Text Editing** | 4-color highlighting (重点/理解/考点/公式), H1/H2/H3 headings, Bold/Italic/Underline |
+| 🔍 **Smart Auto-Scroll** | Auto-follows new subtitles; pauses when user scrolls up to review past content |
 | 📥 **Export** | Word document (`.doc`), PDF print, copy to clipboard |
-| 📚 **Session History** | Auto-save lectures to browser, browse and replay past sessions |
+| 📚 **Session History** | Auto-save lectures to localStorage (max 20), browse and replay past sessions |
 | 🇬🇧 **English-Only Filter** | Automatically skips Chinese speech / pinyin to avoid noise |
 | 🛡️ **Auto Wake-Up** | Pings Render backend on page load to wake from free-tier sleep |
 
@@ -47,12 +50,13 @@ Tabbed view: outline, subtitles, practice questions — with Word/PDF export.
 ```
 Browser (React + Vite + TailwindCSS)
     │  WebSocket (audio binary + JSON messages)
-    │  HTTP POST (PPT upload)
+    │  HTTP POST (courseware upload)
     ▼
 Node.js Backend (Render)
     ├── Azure Speech Services (ASR, en-IN, 16kHz PCM)
     ├── DeepSeek API (translation + outline + questions)
-    └── adm-zip (PPTX text extraction)
+    ├── adm-zip (PPTX text extraction)
+    └── pdfjs-dist + Tesseract.js (PDF text + OCR)
 
 Frontend Deployed on: Vercel
 Backend Deployed on:  Render
@@ -112,6 +116,8 @@ VITE_WS_URL=wss://your-render-backend.onrender.com
 | ASR | Azure Speech Services (en-IN, continuous recognition) |
 | LLM | DeepSeek API (OpenAI-compatible) |
 | PPT Parsing | `adm-zip` (PPTX = ZIP of XML) |
+| PDF Parsing | `pdfjs-dist` + `canvas` (text extraction + render) |
+| OCR | `tesseract.js` (image-based PDF fallback) |
 | Frontend Hosting | Vercel (free) |
 | Backend Hosting | Render (free) |
 
@@ -130,7 +136,7 @@ lecture-note/
 │   ├── App.jsx                   # Root component + routing
 │   ├── index.css                 # Global styles + animations
 │   ├── components/
-│   │   ├── StartScreen.jsx       # Landing page + PPT upload
+│   │   ├── StartScreen.jsx       # Landing page + courseware upload
 │   │   ├── SubtitlePanel.jsx     # Real-time bilingual subtitles
 │   │   ├── OutlinePanel.jsx      # Editable outline + questions
 │   │   ├── RichTextEditor.jsx    # contentEditable + floating toolbar
@@ -147,6 +153,7 @@ lecture-note/
 │   ├── index.js                  # WebSocket + HTTP server
 │   ├── azure-speech.js           # Azure ASR integration
 │   ├── deepseek.js               # DeepSeek API (translate + outline + questions)
+│   ├── pdf-utils.js               # PDF text extraction + OCR fallback
 │   └── package.json              # Server dependencies
 └── .env.example                  # Environment variables template
 ```
