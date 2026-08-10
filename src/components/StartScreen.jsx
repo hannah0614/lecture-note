@@ -64,8 +64,8 @@ export default function StartScreen({ onStart, onViewHistory, error, wakingUp })
       </div>
 
       <div className="relative z-10 text-center px-6 max-w-lg w-full">
-        <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl overflow-hidden shadow-2xl shadow-indigo-500/30 mb-8 animate-fade-up">
-          <img src="/agent-avatar.svg" alt="LectureNote" className="w-full h-full object-cover" />
+        <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 shadow-2xl shadow-indigo-500/30 mb-8 animate-fade-up overflow-hidden">
+          <img src="/agent-avatar.svg" alt="LectureNote" className="w-full h-full object-cover scale-110" />
         </div>
 
         <h1 className="text-4xl font-bold text-white mb-3 tracking-tight animate-fade-up">
